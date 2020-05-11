@@ -144,7 +144,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='DSCNet')
     parser.add_argument('--db', default='coil20',
-                        choices=['coil20', 'coil100', 'usps', 'reuters10k', 'stl'])
+                        choices=['coil20', 'coil100', 'orl', 'reuters10k', 'stl'])
     parser.add_argument('--ae-weights', default=None)
     parser.add_argument('--save-dir', default='results')
     args = parser.parse_args()
@@ -191,6 +191,23 @@ if __name__ == "__main__":
         alpha = 0.04  # threshold of C
         dim_subspace = 12  # dimension of each subspace
         ro = 8  #
+    elif db == 'orl':
+        # load data
+        data = sio.loadmat('datasets/ORL_32x32.mat')
+        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
+        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
+        # network and optimization parameters
+        num_sample = x.shape[0]
+        channels = [1, 3, 3, 5]
+        kernels = [3, 3, 3]
+        epochs = 700
+        weight_coef = 1.0
+        weight_selfExp = 0.1
+
+        # post clustering parameters
+        alpha = 0.2  # threshold of C
+        dim_subspace = 3  # dimension of each subspace
+        ro = 1  #
 
     dscnet = DSCNet(num_sample=num_sample, channels=channels, kernels=kernels)
 
@@ -199,6 +216,11 @@ if __name__ == "__main__":
     ae_state_dict = torch.load('pretrained_weights_original/%s.pkl' % db)
     dscnet.ae.load_state_dict(ae_state_dict)
     print("Pretrained ae weights are loaded successfully.")
-
-    train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
-          alpha=alpha, dim_subspace=dim_subspace, ro=ro, device='cpu')
+    print(dscnet.ae.state_dict())
+    a = np.arange(32 * 32).reshape((1, 1, 32, 32)).astype(np.float)
+    a = torch.tensor(a, dtype=torch.float32)
+    print(a.size())
+    print(dscnet.ae.encoder(a))
+    #
+    # train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
+    #       alpha=alpha, dim_subspace=dim_subspace, ro=ro, device='cpu')

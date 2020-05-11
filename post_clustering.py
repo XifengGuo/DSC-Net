@@ -34,8 +34,8 @@ def err_rate(gt_s, s):
     return 1.0 - acc(gt_s, s)
 
 
-def thrC(C, ro):
-    if ro < 1:
+def thrC(C, alpha):
+    if alpha < 1:
         N = C.shape[1]
         Cp = np.zeros((N, N))
         S = np.abs(np.sort(-np.abs(C), axis=0))
@@ -47,7 +47,7 @@ def thrC(C, ro):
             t = 0
             while (stop == False):
                 csum = csum + S[t, i]
-                if csum > ro * cL1:
+                if csum > alpha * cL1:
                     stop = True
                     Cp[Ind[0:t + 1, i], i] = C[Ind[0:t + 1, i], i]
                 t = t + 1
@@ -57,7 +57,7 @@ def thrC(C, ro):
     return Cp
 
 
-def post_proC(C, K, d, alpha):
+def post_proC(C, K, d, ro):
     # C: coefficient matrix, K: number of clusters, d: dimension of each subspace
     n = C.shape[0]
     C = 0.5 * (C + C.T)
@@ -71,7 +71,7 @@ def post_proC(C, K, d, alpha):
     U = normalize(U, norm='l2', axis=1)
     Z = U.dot(U.T)
     Z = Z * (Z > 0)
-    L = np.abs(Z ** alpha)
+    L = np.abs(Z ** ro)
     L = L / L.max()
     L = 0.5 * (L + L.T)
     spectral = cluster.SpectralClustering(n_clusters=K, eigen_solver='arpack', affinity='precomputed',
@@ -82,6 +82,6 @@ def post_proC(C, K, d, alpha):
 
 
 def spectral_clustering(C, K, d, alpha, ro):
-    C = thrC(C, ro)
-    y, _ = post_proC(C, K, d, alpha)
+    C = thrC(C, alpha)
+    y, _ = post_proC(C, K, d, ro)
     return y

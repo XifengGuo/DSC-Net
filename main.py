@@ -4,26 +4,44 @@ import torch.optim as optim
 import torch.nn.functional as F
 import numpy as np
 from post_clustering import spectral_clustering, acc, nmi
+import scipy.io as sio
 
 
-class Encoder(nn.Module):
-    def __init__(self, in_channel):
-        super(Encoder, self).__init__()
-        self.conv1 = nn.Conv2d(in_channel, 15, kernel_size=3, stride=2, padding=1)
-
-    def forward(self, x):
-        y = F.relu(self.conv1(x))
-        return y
-
-
-class Decoder(nn.Module):
-    def __init__(self, out_channel):
-        super(Decoder, self).__init__()
-        self.deconv1 = nn.ConvTranspose2d(15, 1, kernel_size=3, stride=2, padding=1, output_padding=1)
-
-    def forward(self, x):
-        y = F.relu(self.deconv1(x))
-        return y
+# class Encoder(nn.Module):
+#     def __init__(self, channels, kernels):
+#         """
+#         :param channels: a list containing all channels including the input image channel (1 for gray, 3 for RGB)
+#         :param kernels:  a list containing all kernel sizes, it should satisfy: len(kernels) = len(channels) - 1.
+#         """
+#         super(Encoder, self).__init__()
+#         assert isinstance(channels, list) and isinstance(kernels, list)
+#         self.layers = []
+#         for i in range(1, len(channels)):
+#             self.layers.append(nn.Conv2d(channels[i - 1], channels[i], kernel_size=kernels[i - 1], stride=2, padding=1))
+#             self.layers.append(nn.ReLU(True))
+#         self.model = nn.Sequential(*self.layers)
+#
+#     def forward(self, x):
+#         return self.model(x)
+#
+#
+# class Decoder(nn.Module):
+#     def __init__(self, channels, kernels):
+#         """
+#         :param channels: a list containing all channels including reconstructed image channel (1 for gray, 3 for RGB)
+#         :param kernels: a list containing all kernel sizes, it should satisfy: len(kernels) = len(channels) - 1.
+#         """
+#         super(Decoder, self).__init__()
+#         assert isinstance(channels, list) and isinstance(kernels, list)
+#         self.layers = []
+#         for i in range(len(channels) - 1):
+#             self.layers.append(nn.ConvTranspose2d(channels[i], channels[i + 1], kernel_size=kernels[i], stride=2,
+#                                                   padding=1, output_padding=1))
+#
+#     def forward(self, x):
+#         for layer in self.layers:
+#             x = F.relu(layer(x))
+#         return x
 
 
 class SelfExpression(nn.Module):
@@ -36,27 +54,50 @@ class SelfExpression(nn.Module):
         return y
 
 
-class AE(nn.Module):
-    def __init__(self, num_channel):
-        super(AE, self).__init__()
-        self.encoder = Encoder(num_channel)
-        self.decoder = Decoder(num_channel)
+class ConvAE(nn.Module):
+    def __init__(self, channels, kernels):
+        """
+        :param channels: a list containing all channels including the input image channel (1 for gray, 3 for RGB)
+        :param kernels:  a list containing all kernel sizes, it should satisfy: len(kernels) = len(channels) - 1.
+        """
+        super(ConvAE, self).__init__()
+        assert isinstance(channels, list) and isinstance(kernels, list)
+        self.encoder = nn.Sequential()
+        for i in range(1, len(channels)):
+            #  Each layer will divide the size of feature map by 2
+            self.encoder.add_module(
+                'conv%d' % i,
+                nn.Conv2d(channels[i - 1], channels[i], kernel_size=kernels[i - 1], stride=2,
+                          padding=int(kernels[i - 1] / 2))
+            )
+            self.encoder.add_module('relu%d' % i, nn.ReLU(True))
+
+        self.decoder = nn.Sequential()
+        channels = list(reversed(channels))
+        for i in range(len(channels) - 1):
+            # Each layer will double the size of feature map
+            self.decoder.add_module(
+                'deconv%d' % (i + 1),
+                nn.ConvTranspose2d(channels[i], channels[i + 1], kernel_size=kernels[i], stride=2,
+                                   padding=int(kernels[i] / 2), output_padding=1)
+            )
+            self.decoder.add_module('relud%d' % i, nn.ReLU(True))
 
     def forward(self, x):
         h = self.encoder(x)
         y = self.decoder(h)
+        return y
 
 
 class DSCNet(nn.Module):
-    def __init__(self, num_sample, num_channel):
+    def __init__(self, channels, kernels, num_sample):
         super(DSCNet, self).__init__()
-        self.n, self.c, = num_sample, num_channel
-        self.encoder = Encoder(self.c)
+        self.n = num_sample
+        self.ae = ConvAE(channels, kernels)
         self.self_expression = SelfExpression(self.n)
-        self.decoder = Decoder(self.c)
 
     def forward(self, x):  # shape=[n, c, w, h]
-        z = self.encoder(x)
+        z = self.ae.encoder(x)
 
         # self expression layer, reshape to vectors, multiply Coefficient, then reshape back
         shape = z.shape
@@ -64,7 +105,7 @@ class DSCNet(nn.Module):
         z_recon = self.self_expression(z)  # shape=[n, d]
         z_recon_reshape = z_recon.view(shape)
 
-        x_recon = self.decoder(z_recon_reshape)  # shape=[n, c, w, h]
+        x_recon = self.ae.decoder(z_recon_reshape)  # shape=[n, c, w, h]
         return x_recon, z, z_recon
 
     def loss_fn(self, x, x_recon, z, z_recon, weight_coef, weight_selfExp):
@@ -77,7 +118,8 @@ class DSCNet(nn.Module):
 
 
 def train(model,  # type: DSCNet
-          x, y, epochs, lr=1e-3, device='cuda'):
+          x, y, epochs, lr=1e-3, weight_coef=1.0, weight_selfExp=150, device='cuda',
+          alpha=0.04, dim_subspace=12, ro=8):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     if not isinstance(x, torch.Tensor):
         x = torch.tensor(x, dtype=torch.float32, device=device)
@@ -87,34 +129,76 @@ def train(model,  # type: DSCNet
     model.to(device)
     for epoch in range(epochs):
         x_recon, z, z_recon = model(x)
-        loss = model.loss_fn(x, x_recon, z, z_recon, weight_coef=1.0, weight_selfExp=150)
+        loss = model.loss_fn(x, x_recon, z, z_recon, weight_coef=weight_coef, weight_selfExp=weight_selfExp)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         if epoch % 10 == 0:
             C = model.self_expression.Coefficient.detach().to('cpu').numpy()
-            y_pred = spectral_clustering(C, K, 12, 8, 0.04)
+            y_pred = spectral_clustering(C, K, dim_subspace, alpha, ro)
             print('Epoch %02d: loss=%.4f, acc=%.4f, nmi=%.4f' % (epoch, loss.item(), acc(y, y_pred), nmi(y, y_pred)))
 
 
-# load data
-import scipy.io as sio
+if __name__ == "__main__":
+    import argparse
 
-data = sio.loadmat('datasets/COIL20.mat')
-x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
-y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
-data_shape = x.shape
+    parser = argparse.ArgumentParser(description='DSCNet')
+    parser.add_argument('--db', default='coil20',
+                        choices=['coil20', 'coil100', 'usps', 'reuters10k', 'stl'])
+    parser.add_argument('--ae-weights', default=None)
+    parser.add_argument('--save-dir', default='results')
+    args = parser.parse_args()
+    print(args)
+    import os
 
-ae = AE(data_shape[1])
+    if not os.path.exists(args.save_dir):
+        os.makedirs(args.save_dir)
 
-dscnet = DSCNet(num_sample=data_shape[0], num_channel=data_shape[1])
+    db = args.db
+    if db == 'coil20':
+        # load data
+        data = sio.loadmat('datasets/COIL20.mat')
+        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
+        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
 
-# load the pretrained weights which are provided by the original author in
-# https://github.com/panji1990/Deep-subspace-clustering-networks
-dscnet_dict = dscnet.state_dict()
-pretrain_weights = torch.load('pretrained_weights_original/coil20.pkl')
-state_dict = {k:v for k,v in pretrain_weights.items() if k in dscnet_dict.keys()}
-dscnet_dict.update(state_dict)  # filter out the Coefficient parameter which is not pretrained.
-dscnet.load_state_dict(dscnet_dict)
+        # network and optimization parameters
+        num_sample = x.shape[0]
+        channels = [1, 15]
+        kernels = [3]
+        epochs = 30
+        weight_coef = 1.0
+        weight_selfExp = 150
 
-train(dscnet, x, y, 30, device='cpu')
+        # post clustering parameters
+        alpha = 0.04  # threshold of C
+        dim_subspace = 12  # dimension of each subspace
+        ro = 8  #
+    elif db == 'coil100':
+        # load data
+        data = sio.loadmat('datasets/COIL100.mat')
+        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
+        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
+
+        # network and optimization parameters
+        num_sample = x.shape[0]
+        channels = [1, 50]
+        kernels = [5]
+        epochs = 120
+        weight_coef = 1.0
+        weight_selfExp = 30
+
+        # post clustering parameters
+        alpha = 0.04  # threshold of C
+        dim_subspace = 12  # dimension of each subspace
+        ro = 8  #
+
+    dscnet = DSCNet(num_sample=num_sample, channels=channels, kernels=kernels)
+
+    # load the pretrained weights which are provided by the original author in
+    # https://github.com/panji1990/Deep-subspace-clustering-networks
+    ae_state_dict = torch.load('pretrained_weights_original/%s.pkl' % db)
+    dscnet.ae.load_state_dict(ae_state_dict)
+    print("Pretrained ae weights are loaded successfully.")
+
+    train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
+          alpha=alpha, dim_subspace=dim_subspace, ro=ro, device='cpu')

@@ -1,3 +1,7 @@
+"""
+By Xifeng Guo (guoxifeng1990@163.com), May 13, 2020.
+All rights reserved.
+"""
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -9,13 +13,16 @@ import math
 
 
 class Conv2dSamePad(nn.Module):
-    """Mimics tensorflow's 'SAME' padding.
     """
-
+    Implement Tensorflow's 'SAME' padding mode in Conv2d.
+    When an odd number, say `m`, of pixels are need to pad, Tensorflow will pad one more column at right or one more
+    row at bottom. But Pytorch will pad `m+1` pixels, i.e., Pytorch always pads in both sides.
+    So we can pad the tensor in the way of Tensorflow before call the Conv2d module.
+    """
     def __init__(self, kernel_size, stride):
         super(Conv2dSamePad, self).__init__()
-        self.kernel_size = torch.nn.modules.utils._pair(kernel_size)
-        self.stride = torch.nn.modules.utils._pair(stride)
+        self.kernel_size = kernel_size if type(kernel_size) in [list, tuple] else [kernel_size, kernel_size]
+        self.stride = stride if type(stride) in [list, tuple] else [stride, stride]
 
     def forward(self, x):
         in_height = x.size(2)

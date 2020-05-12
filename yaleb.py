@@ -18,16 +18,16 @@ class Conv2dSamePad(nn.Module):
         self.stride = torch.nn.modules.utils._pair(stride)
 
     def forward(self, x):
-        in_width = x.size(2)
-        in_height = x.size(3)
-        out_width = math.ceil(float(in_width) / float(self.stride[0]))
-        out_height = math.ceil(float(in_height) / float(self.stride[1]))
-        pad_along_width = ((out_width - 1) * self.stride[0] + self.kernel_size[0] - in_width)
-        pad_along_height = ((out_height - 1) * self.stride[1] + self.kernel_size[1] - in_height)
-        pad_left = math.floor(pad_along_width / 2)
+        in_height = x.size(2)
+        in_width = x.size(3)
+        out_height = math.ceil(float(in_height) / float(self.stride[0]))
+        out_width = math.ceil(float(in_width) / float(self.stride[1]))
+        pad_along_height = ((out_height - 1) * self.stride[0] + self.kernel_size[0] - in_height)
+        pad_along_width = ((out_width - 1) * self.stride[1] + self.kernel_size[1] - in_width)
         pad_top = math.floor(pad_along_height / 2)
-        pad_right = pad_along_width - pad_left
+        pad_left = math.floor(pad_along_width / 2)
         pad_bottom = pad_along_height - pad_top
+        pad_right = pad_along_width - pad_left
         return F.pad(x, [pad_left, pad_right, pad_top, pad_bottom], 'constant', 0)
 
 
@@ -59,15 +59,15 @@ class ConvTranspose2dSamePad(nn.Module):
         self.output_size = output_size
 
     def forward(self, x):
-        in_width = x.size(2)
-        in_height = x.size(3)
-        pad_width = in_width - self.output_size[0]
-        pad_height = in_height - self.output_size[1]
-        pad_left = pad_width // 2
-        pad_right = pad_width - pad_left
+        in_height = x.size(2)
+        in_width = x.size(3)
+        pad_height = in_height - self.output_size[0]
+        pad_width = in_width - self.output_size[1]
         pad_top = pad_height // 2
         pad_bottom = pad_height - pad_top
-        return x[:, :, pad_left:in_width - pad_right, pad_top: in_height - pad_bottom]
+        pad_left = pad_width // 2
+        pad_right = pad_width - pad_left
+        return x[:, :, pad_top:in_height - pad_bottom, pad_left: in_width - pad_right]
 
 
 class ConvAE(nn.Module):
@@ -151,6 +151,7 @@ def train(model,  # type: DSCNet
     optimizer = optim.Adam(model.parameters(), lr=lr)
     if not isinstance(x, torch.Tensor):
         x = torch.tensor(x, dtype=torch.float32, device=device)
+    x = x.to(device)
     if isinstance(y, torch.Tensor):
         y = y.to('cpu').numpy()
     K = len(np.unique(y))
@@ -184,6 +185,7 @@ if __name__ == "__main__":
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     db = args.db
     if db == 'yaleb':
         # load data
@@ -240,7 +242,7 @@ if __name__ == "__main__":
             print("Pretrained ae weights are loaded successfully.")
 
             acc_i, nmi_i = train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
-                                 alpha=alpha, dim_subspace=dim_subspace, ro=ro, show=args.show_freq, device='cpu')
+                                 alpha=alpha, dim_subspace=dim_subspace, ro=ro, show=args.show_freq, device=device)
             acc_subjects.append(acc_i)
             nmi_subjects.append(nmi_i)
         acc_avg.append(sum(acc_subjects)/len(acc_subjects))

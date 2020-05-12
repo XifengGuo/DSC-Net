@@ -44,35 +44,25 @@ class ConvTranspose2dSamePad(nn.Module):
     In contrast, Tensorflow deletes more columns in the right, i.e., the first floor(pad/2) and last `pad - floor(pad/2)`
     columns are deleted.
     For the height, Pytorch deletes more rows at top, while Tensorflow at bottom.
-    In practice, we usually want `w_pad = w_in * stride`, i.e., the "SAME" padding mode in Tensorflow,
-    so the number of columns to delete:
-        pad = 2*padding - output_padding = kernel - stride
-    We can solve the above equation and get:
-        padding = ceil((kernel - stride)/2), and
-        output_padding = 2*padding - (kernel - stride) which is either 1 or 0.
-    But to get the same result with Tensorflow, we should delete values by ourselves instead of using padding and
-    output_padding in ConvTranspose2d.
-    To get there, we check the following conditions:
-    If pad = kernel - stride is even, we can directly set padding=pad/2 and output_padding=0 in ConvTranspose2d.
-    If pad = kernel - stride is odd, we can use ConvTranspose2d to get T_nopad, and then delete `pad` rows/columns by
-    ourselves; or we can use ConvTranspose2d to delete `pad - 1` by setting `padding=(pad - 1) / 2` and `ouput_padding=0`
-    and then delete the last row/column of the resulting tensor by ourselves.
-    Here we implement the former case.
+    In practice, we usually want `w_pad = w_in * stride` or `w_pad = w_in * stride - 1`, i.e., the "SAME" padding mode
+    in Tensorflow. To determine the value of `w_pad`, we should pass it to this function.
+    So the number of columns to delete:
+        pad = 2*padding - output_padding = w_nopad - w_pad
+    If pad is even, we can directly set padding=pad/2 and output_padding=0 in ConvTranspose2d.
+    If pad is odd, we can use ConvTranspose2d to get T_nopad, and then delete `pad` rows/columns by
+    ourselves.
     This module should be called after the ConvTranspose2d module with shared kernel_size and stride values.
-    And this module can only output a tensor with shape `stride * size_input`.
-    A more flexible module can be found in `yaleb.py` which can output arbitrary size as specified.
     """
 
-    def __init__(self, kernel_size, stride):
+    def __init__(self, output_size):
         super(ConvTranspose2dSamePad, self).__init__()
-        self.kernel_size = torch.nn.modules.utils._pair(kernel_size)
-        self.stride = torch.nn.modules.utils._pair(stride)
+        self.output_size = output_size
 
     def forward(self, x):
         in_width = x.size(2)
         in_height = x.size(3)
-        pad_width = self.kernel_size[0] - self.stride[0]
-        pad_height = self.kernel_size[1] - self.stride[1]
+        pad_width = in_width - self.output_size[0]
+        pad_height = in_height - self.output_size[1]
         pad_left = pad_width // 2
         pad_right = pad_width - pad_left
         pad_top = pad_height // 2
@@ -92,18 +82,23 @@ class ConvAE(nn.Module):
         for i in range(1, len(channels)):
             #  Each layer will divide the size of feature map by 2
             self.encoder.add_module('pad%d' % i, Conv2dSamePad(kernels[i - 1], 2))
-            self.encoder.add_module('conv%d' % i,
-                                    nn.Conv2d(channels[i - 1], channels[i], kernel_size=kernels[i - 1], stride=2))
+            self.encoder.add_module(
+                'conv%d' % i,
+                nn.Conv2d(channels[i - 1], channels[i], kernel_size=kernels[i - 1], stride=2)
+            )
             self.encoder.add_module('relu%d' % i, nn.ReLU(True))
 
         self.decoder = nn.Sequential()
         channels = list(reversed(channels))
         kernels = list(reversed(kernels))
+        sizes = [[12, 11], [24, 21], [48, 42]]
         for i in range(len(channels) - 1):
             # Each layer will double the size of feature map
-            self.decoder.add_module('deconv%d' % (i + 1),
-                                    nn.ConvTranspose2d(channels[i], channels[i + 1], kernel_size=kernels[i], stride=2))
-            self.decoder.add_module('padd%d' % i, ConvTranspose2dSamePad(kernels[i], 2))
+            self.decoder.add_module(
+                'deconv%d' % (i + 1),
+                nn.ConvTranspose2d(channels[i], channels[i + 1], kernel_size=kernels[i], stride=2)
+            )
+            self.decoder.add_module('padd%d' % i, ConvTranspose2dSamePad(sizes[i]))
             self.decoder.add_module('relud%d' % i, nn.ReLU(True))
 
     def forward(self, x):
@@ -115,7 +110,7 @@ class ConvAE(nn.Module):
 class SelfExpression(nn.Module):
     def __init__(self, n):
         super(SelfExpression, self).__init__()
-        self.Coefficient = nn.Parameter(1.0e-8 * torch.ones(n, n, dtype=torch.float32), requires_grad=True)
+        self.Coefficient = nn.Parameter(1.0e-4 * torch.ones(n, n, dtype=torch.float32), requires_grad=True)
 
     def forward(self, x):  # shape=[n, d]
         y = torch.matmul(self.Coefficient, x)
@@ -142,17 +137,17 @@ class DSCNet(nn.Module):
         return x_recon, z, z_recon
 
     def loss_fn(self, x, x_recon, z, z_recon, weight_coef, weight_selfExp):
-        loss_ae = F.mse_loss(x_recon, x, reduction='sum')
+        loss_ae = 0.5 * F.mse_loss(x_recon, x, reduction='sum')
         loss_coef = torch.sum(torch.pow(self.self_expression.Coefficient, 2))
-        loss_selfExp = F.mse_loss(z_recon, z, reduction='sum')
+        loss_selfExp = 0.5 * F.mse_loss(z_recon, z, reduction='sum')
         loss = loss_ae + weight_coef * loss_coef + weight_selfExp * loss_selfExp
-
+        loss /= x.size(0)  # just control the range, does not affect the optimization.
         return loss
 
 
 def train(model,  # type: DSCNet
-          x, y, epochs, lr=1e-3, weight_coef=1.0, weight_selfExp=150, device='cuda',
-          alpha=0.04, dim_subspace=12, ro=8, show=10):
+          x, y, epochs, lr=1e-3, weight_coef=1.0, weight_selfExp=150.0, device='cuda',
+          alpha=0.04, dim_subspace=12, ro=8.0, show=10):
     optimizer = optim.Adam(model.parameters(), lr=lr)
     if not isinstance(x, torch.Tensor):
         x = torch.tensor(x, dtype=torch.float32, device=device)
@@ -160,6 +155,7 @@ def train(model,  # type: DSCNet
         y = y.to('cpu').numpy()
     K = len(np.unique(y))
     model.to(device)
+    acc_, nmi_ = 0., 0.
     for epoch in range(epochs):
         x_recon, z, z_recon = model(x)
         loss = model.loss_fn(x, x_recon, z, z_recon, weight_coef=weight_coef, weight_selfExp=weight_selfExp)
@@ -169,91 +165,89 @@ def train(model,  # type: DSCNet
         if epoch % show == 0 or epoch == epochs - 1:
             C = model.self_expression.Coefficient.detach().to('cpu').numpy()
             y_pred = spectral_clustering(C, K, dim_subspace, alpha, ro)
-            print('Epoch %02d: loss=%.4f, acc=%.4f, nmi=%.4f' %
-                  (epoch, loss.item() / y_pred.shape[0], acc(y, y_pred), nmi(y, y_pred)))
+            acc_, nmi_ = acc(y, y_pred), nmi(y, y_pred)
+            print('Epoch %02d: loss=%.4f, acc=%.4f, nmi=%.4f' % (epoch, loss.item(), acc_, nmi_))
+    return acc_, nmi_
 
 
 if __name__ == "__main__":
     import argparse
-    import warnings
+    import os
 
     parser = argparse.ArgumentParser(description='DSCNet')
-    parser.add_argument('--db', default='coil20',
-                        choices=['coil20', 'coil100', 'orl', 'reuters10k', 'stl'])
-    parser.add_argument('--show-freq', default=10, type=int)
+    parser.add_argument('--db', default='yaleb', choices=['yaleb'])
+    parser.add_argument('--show-freq', default=100, type=int)
     parser.add_argument('--ae-weights', default=None)
     parser.add_argument('--save-dir', default='results')
     args = parser.parse_args()
     print(args)
-    import os
-
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir)
 
     db = args.db
-    if db == 'coil20':
+    if db == 'yaleb':
         # load data
-        data = sio.loadmat('datasets/COIL20.mat')
-        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
-        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
+        data = sio.loadmat('datasets/YaleBCrop025.mat')
+        img = data['Y']
+        I = []
+        Label = []
+        for i in range(img.shape[2]):
+            for j in range(img.shape[1]):
+                temp = np.reshape(img[:, j, i], [42, 48])
+                Label.append(i)
+                I.append(temp)
+        I = np.array(I)
+        y_total = np.array(Label[:])
+        Img = np.transpose(I, [0, 2, 1])
+        x_total = np.expand_dims(Img[:], 1)
+        print(x_total.shape)
+        print(y_total.shape)
+        print(np.unique(y_total))
 
         # network and optimization parameters
-        num_sample = x.shape[0]
-        channels = [1, 15]
-        kernels = [3]
-        epochs = 40
+        channels = [1, 10, 20, 30]
+        kernels = [5, 3, 3]
+
+        # post clustering parameters
+        # alpha = 0.04  # threshold of C
+        dim_subspace = 10  # dimension of each subspace
+        ro = 3.5
+    else:
+        exit(1)
+
+    all_subjects = [38]  # [10, 15, 20, 25, 30, 35, 38]
+    acc_avg, nmi_avg = [], []
+    iter_loop = 0
+    for iter_loop in range(len(all_subjects)):  # how many subjects to use
+        num_class = all_subjects[iter_loop]
+        num_sample = num_class * 64
+        epochs = 50 + num_class * 25
         weight_coef = 1.0
-        weight_selfExp = 75
+        weight_selfExp = 1.0 * 10 ** (num_class / 10.0 - 3.0)
+        alpha = max(0.4 - (num_class - 1) / 10 * 0.1, 0.1)
+        print('='*20, 'Train on %d subjects' % num_class, '='*20)
+        acc_subjects, nmi_subjects = [], []
+        for i in range(0, 39 - num_class):  # which `num_class` subjects to use
+            print('-'*20, 'The %dth / %d group of %d subjects' % (i+1, 39-num_class, num_class), '-'*20)
+            x = x_total[64 * i:64 * (i + num_class)].astype(float)
+            y = y_total[64 * i:64 * (i + num_class)]
+            y = y - y.min()
 
-        # post clustering parameters
-        alpha = 0.04  # threshold of C
-        dim_subspace = 12  # dimension of each subspace
-        ro = 8  #
-        warnings.warn("You can uncomment line#64 in post_clustering.py to get better result for this dataset!")
-    elif db == 'coil100':
-        # load data
-        data = sio.loadmat('datasets/COIL100.mat')
-        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
-        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
+            dscnet = DSCNet(num_sample=num_sample, channels=channels, kernels=kernels)
+            # load the pretrained weights which are provided by the original author in
+            # https://github.com/panji1990/Deep-subspace-clustering-networks
+            dscnet.ae.load_state_dict(torch.load('pretrained_weights_original/%s.pkl' % db))
+            print("Pretrained ae weights are loaded successfully.")
 
-        # network and optimization parameters
-        num_sample = x.shape[0]
-        channels = [1, 50]
-        kernels = [5]
-        epochs = 120
-        weight_coef = 1.0
-        weight_selfExp = 15
+            acc_i, nmi_i = train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
+                                 alpha=alpha, dim_subspace=dim_subspace, ro=ro, show=args.show_freq, device='cpu')
+            acc_subjects.append(acc_i)
+            nmi_subjects.append(nmi_i)
+        acc_avg.append(sum(acc_subjects)/len(acc_subjects))
+        nmi_avg.append(sum(nmi_subjects)/len(nmi_subjects))
+        print(acc_avg, nmi_avg)
 
-        # post clustering parameters
-        alpha = 0.04  # threshold of C
-        dim_subspace = 12  # dimension of each subspace
-        ro = 8  #
-    elif db == 'orl':
-        # load data
-        data = sio.loadmat('datasets/ORL_32x32.mat')
-        x, y = data['fea'].reshape((-1, 1, 32, 32)), data['gnd']
-        y = np.squeeze(y - 1)  # y in [0, 1, ..., K-1]
-        # network and optimization parameters
-        num_sample = x.shape[0]
-        channels = [1, 3, 3, 5]
-        kernels = [3, 3, 3]
-        epochs = 700
-        weight_coef = 2.0
-        weight_selfExp = 0.2
-
-        # post clustering parameters
-        alpha = 0.2  # threshold of C
-        dim_subspace = 3  # dimension of each subspace
-        ro = 1  #
-
-    dscnet = DSCNet(num_sample=num_sample, channels=channels, kernels=kernels)
-
-    # load the pretrained weights which are provided by the original author in
-    # https://github.com/panji1990/Deep-subspace-clustering-networks
-    ae_state_dict = torch.load('pretrained_weights_original/%s.pkl' % db)
-    dscnet.ae.load_state_dict(ae_state_dict)
-    print("Pretrained ae weights are loaded successfully.")
-
-    train(dscnet, x, y, epochs, weight_coef=weight_coef, weight_selfExp=weight_selfExp,
-          alpha=alpha, dim_subspace=dim_subspace, ro=ro, show=args.show_freq, device='cpu')
-    torch.save(dscnet.state_dict(), args.save_dir + '/%s-model.ckp' % args.db)
+    for iter_loop in range(len(all_subjects)):
+        num_class = all_subjects[iter_loop]
+        print('%d subjects:' % num_class)
+        print('Acc: %.4f%%' % (acc_avg[iter_loop] * 100), 'Nmi: %.4f%%' % (nmi_avg[iter_loop] * 100))

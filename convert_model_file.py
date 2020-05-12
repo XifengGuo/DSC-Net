@@ -3,13 +3,16 @@ import torch
 import pickle
 from main import ConvAE
 
-db = 'orl'
+db = 'yaleb'
 if db == 'coil20':
     ae = ConvAE(channels=[1, 16], kernels=[3])  # coil20
 elif db == 'coil100':
     ae = ConvAE(channels=[1, 50], kernels=[5])  # coil100
 elif db == 'orl':
     ae = ConvAE(channels=[1, 3, 3, 5], kernels=[3, 3, 3])
+elif db == 'yaleb':
+    from yaleb import ConvAE
+    ae = ConvAE(channels=[1, 10, 20, 30], kernels=[5, 3, 3])
 
 state_dict = ae.state_dict()
 
